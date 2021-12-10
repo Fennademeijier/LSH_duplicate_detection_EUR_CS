@@ -1,0 +1,1205 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Nov  1 18:56:14 2021
+
+@author: fennademeijier
+"""
+
+import json
+import numpy as np
+import pandas as pd
+import random
+
+with open('/Users/fennademeijier/Downloads/TVs-all-merged 2.json', 'r') as read_file:
+    data_1 = json.load(read_file)
+    
+#Lars
+#data = json.load(f)
+read_file.close()
+
+dataframe = pd.json_normalize(data_1).transpose()
+model_id = []
+features = []
+titles = []
+shop = []
+for i in range(len(dataframe)):
+    for j in range(len(dataframe[0][i])):
+        model_id.append(dataframe[0][i][j]['modelID'])
+        features.append(dataframe[0][i][j]['featuresMap'])
+        titles.append(dataframe[0][i][j]['title'])
+        shop.append(dataframe[0][i][j]['shop'])
+    
+import re
+
+def replace(original, repl, by):
+    ''' Function to replace certain expressions in the title by their normalized counterpart'''
+    corrected = []
+    for x in original:
+        corr = re.sub(repl, by, x)
+        corrected.append(corr)
+    
+    return corrected
+  
+
+def pickRandomCoeffs(k):
+  max_val = 2000 #Which value is appropriate? 
+  # Create a list of 'k' random values.
+  randList = []
+  
+  while k > 0:
+    # Get a random shingle ID.
+    randIndex = random.randint(0, max_val) 
+  
+    # Ensure that each random number is unique.
+    while randIndex in randList:
+      randIndex = random.randint(0, max_val) 
+    
+    # Add the random number to the list.
+    randList.append(randIndex)
+    k = k - 1
+    
+  return randList
+
+def LSH_CANDIDATE_PAIRS(titles, shop, features, model_id, threshold, bands, rows, sig_dim):
+    '''
+    Step 1: Choose product specification and turn this into a binary vector for every product.
+
+    '''
+    # Product specification: tokens of model words from title (after data cleaning) + first word from title
+    # In addition: use model words from value part of key-value pair and number of features tot tokens
+    # Data cleaning: normalization of al forms of inch to 'inch', idem for 'hz' 
+    featurez = features
+    
+    values = [] #List that includes all values per tv
+    for feat in featurez:
+        for k, v in feat.items():
+           values.append(v)
+    titlez = titles
+    
+    # Replace inch
+    for i in ['"', 'Inch', '-inch', ' inch', 'inch', 'inches']:
+        titlez = replace(titlez, i, 'inch')
+        values = replace(values, i, 'inch')
+
+    # Replace hertz
+    for i in ['Hertz', 'hertz', 'Hz', 'HZ', ' hz', '-hz', 'hz']:
+        titlez = replace(titlez, i, 'hz')
+        values = replace(values, i, 'hz')
+    
+    # Take out correct tokens from Title
+    tokens_tit = []
+    for i in titlez:
+        token = re.findall("((?:[a-zA-Z]+[0-9]|[0-9]+[a-zA-Z])[a-zA-Z0-9]*)" , i) 
+        for ii in token:
+            tokens_tit.append(ii)
+
+    # Add first word of title to tokens list
+    for title in titlez:
+        tokens_tit.append(title.split()[0])
+
+    # Collect correct tokens from Values
+    tokens_val = []
+    for i in values:
+        token = re.findall("((?:[a-zA-Z]+[\x21-\x7E]+[0-9]|[0-9]+[\x21-\x7E]+[a-zA-Z])[a-zA-Z0-9]*)" , i) 
+        for ii in token:
+            tokens_val.append(ii)
+    
+
+    # Add length of feature list to tokens
+    for feat in featurez:
+        length = len(feat)
+        tokens_val.append(length)
+    
+    tokens = tokens_val + tokens_tit
+    
+    #Remove dumplicates from list (1263 unique tokens)
+    tokens = list(set(tokens))
+
+    #Create title-'like' value list per tv
+    values_list = []
+    for feat in featurez:
+        length = len(feat) 
+        st = ' '.join(str(v) for v in feat.values())
+        s = st + ' ' + str(length)  
+        values_list.append(str(s))
+    
+    tv_wordlist = []
+    for i in range(len(titlez)):
+        tv_words = values_list[i] + ' ' + titles[i]
+        tv_wordlist.append(tv_words)
+    
+    #Correct Tvwordlist
+    # Replace inch
+    for i in ['"', 'Inch', '-inch', ' inch', 'inch', 'inches']:
+        tv_wordlist = replace(tv_wordlist, i, 'inch')
+        values_list = replace(values_list, i, 'inch')
+
+    # Replace hertz
+    for i in ['Hertz', 'hertz', 'Hz', 'HZ', ' hz', '-hz', 'hz']:
+        tv_wordlist = replace(tv_wordlist, i, 'hz')
+        values_list = replace(values_list, i, 'inch')    
+
+    #Create binary vectors
+    binary_vectors = []
+    for tv_ in tv_wordlist:
+        binary_vec = np.zeros(len(tokens), dtype=np.int8)
+        for i in range(len(tokens)):
+            if (tokens[i] in tv_.split()) is True:
+                binary_vec[i] = 1
+            else:
+                binary_vec[i] = 0
+        binary_vectors.append(binary_vec)
+        
+    '''
+    Step 2: Compres the binary vector matrix to a signature matrix by means of min-hashing.  
+    
+    '''
+    # Our random hash function will take the form of:
+    #   h(x) = (a*x + b) % c
+    # Where 'x' is the input value, 'a' and 'b' are random coefficients, and 'c' is
+    # a prime number just greater than maxShingleID.        
+    
+    # def get_br(sig_dim, threshold):
+    #     """Approximates the bandwidth (number of rows in each band)
+    #     needed to get threshold.
+    #     Threshold t = (1/b) ** (1/r) where
+    #     b = #bands
+    #     r = #rows per band
+    #     n = b * r = #elements in signature
+    #     """
+    #     n = sig_dim
+    #     t = threshold
+    #     def get_bandwidth(n, t):
+        
+    #         best = n, 1
+    #         minerr  = float("inf")
+    #         for r in range(1, n + 1):
+    #             try:
+    #                 b = 1. / (t ** r)
+    #             except:             # Divide by zero, your signature is huge
+    #                 return best
+    #             err = abs(n - b * r)
+    #             if err < minerr:
+    #                 best = r
+    #                 minerr = err
+    #         return best
+    #     r = get_bandwidth(n, t)
+    #     b = int(n / r)
+    #     err = n - b * r
+    #     new_sig_dim = n - err
+    #     return [b, r, new_sig_dim]
+    
+    bands = bands
+    rows = rows
+    new_sig_dim = sig_dim
+    
+    # For each of the 'numHashes' hash functions, generate a different coefficient 'a' and 'b'.   
+    coeffA = pickRandomCoeffs(new_sig_dim)
+    coeffB = pickRandomCoeffs(new_sig_dim)
+
+    signatures = []
+    global P
+    P = len(tokens)+1
+    
+    def minhash(s, prime= P):
+        vec = [float('inf') for i in range(new_sig_dim)]
+        for val_idx, val in enumerate(s):
+            if val==1:
+                for i in range(new_sig_dim):  
+                    output = (coeffA[i] * val_idx + coeffB[i]) % prime 
+                 
+                    if vec[i] > output:
+                        vec[i] = output
+                     
+        return vec
+
+    for bin_vec in binary_vectors:
+        signatures.append(minhash(bin_vec))
+    
+    
+    '''
+    Step 3: The obtained signature vectors are used as input for the LSH algorithm. 
+    
+    '''
+    def initialize_array_bucket(bands):
+        array_buckets = []
+        for band in range(bands):
+            array_buckets.append([[] for i in range(P)])
+        return array_buckets
+
+    from sklearn.metrics import jaccard_score
+
+    def apply_LSH_technique(SIG = np.matrix(signatures).transpose() , t = threshold, bands=bands, rows=rows):
+        if bands * rows != len(SIG):
+            raise 'bands*rows must be equals to n :: bands*rows = n !!!'
+    
+        array_buckets = initialize_array_bucket(bands)
+        candidates = {}
+        i = 0
+        for b in range(bands):
+            buckets = array_buckets[b]        
+            band = SIG[i:i+rows,:]
+            for col in range(band.shape[1]):
+                key = int(sum(band[:,col]) % len(buckets))
+                buckets[key].append(col)
+            i = i+rows
+        
+            for item in buckets:
+                if len(item) > 1:
+                    pair = (item[0], item[1])
+                    if pair not in candidates:
+                        A = SIG[:,item[0]]
+                        B = SIG[:,item[1]]
+                        similarity = jaccard_score(A,B, average='macro')
+                        if similarity >= t:
+                            candidates[pair] = similarity
+    
+        sort = sorted(candidates.items(), reverse=True)
+        return candidates,sort
+    
+    candidates = apply_LSH_technique(SIG = np.matrix(signatures).transpose(), t = threshold, bands=bands, rows=rows)[0]
+    
+    return candidates 
+
+def SIGdim(features, titles):
+    '''
+    Find the dimension of the Signature vector so that b and r can be set appropriately. 
+
+    '''
+    # Product specification: tokens of model words from title (after data cleaning) + first word from title
+    # In addition: use model words from value part of key-value pair and number of features tot tokens
+    # Data cleaning: normalization of al forms of inch to 'inch', idem for 'hz' 
+    featurez = features
+    values = [] #List that includes all values per tv
+    for feat in featurez:
+        for k, v in feat.items():
+           values.append(v)
+    titlez = titles
+    # Replace inch
+    for i in ['"', 'Inch', '-inch', ' inch', 'inch', 'inches']:
+        titlez = replace(titlez, i, 'inch')
+        values = replace(values, i, 'inch')
+
+    # Replace hertz
+    for i in ['Hertz', 'hertz', 'Hz', 'HZ', ' hz', '-hz', 'hz']:
+        titlez = replace(titlez, i, 'hz')
+        values = replace(values, i, 'hz')
+    
+    # Take out correct tokens from Title
+    tokens_tit = []
+    for i in titlez:
+        token = re.findall("((?:[a-zA-Z]+[0-9]|[0-9]+[a-zA-Z])[a-zA-Z0-9]*)" , i) 
+        for ii in token:
+            tokens_tit.append(ii)
+
+    # Add first word of title to tokens list
+    for title in titlez:
+        tokens_tit.append(title.split()[0])
+
+    # Collect correct tokens from Values
+    tokens_val = []
+    for i in values:
+        token = re.findall("((?:[a-zA-Z]+[\x21-\x7E]+[0-9]|[0-9]+[\x21-\x7E]+[a-zA-Z])[a-zA-Z0-9]*)" , i) 
+        for ii in token:
+            tokens_val.append(ii)
+    
+
+    # Add length of feature list to tokens
+    for feat in featurez:
+        length = len(feat)
+        tokens_val.append(length)
+    
+    tokens = tokens_val + tokens_tit
+    
+    #Remove dumplicates from list 
+    tokens = list(set(tokens))
+    return int(len(tokens)/2)
+                    
+'''
+Step 4: LSH Performance
+    
+'''
+#Use 5 bootstraps 
+#First step: create 5 bootstrap samples
+#BOOTSTRAP
+from sklearn.utils import resample
+indexes = [i for i in range(1624)] 
+
+trainset = []
+testset = []
+for i in range(5):
+    train = resample(indexes, replace=True, n_samples = int(len(indexes) * 0.63))
+    trainset.append(train)
+    test = [x for x in indexes if x not in train]
+    testset.append(test)
+    
+titles_0 = [titles[x] for x in trainset[0]]
+shop_0 = [shop[x] for x in trainset[0]]
+features_0 = [features[x] for x in trainset[0]]
+model_id_0 = [model_id[x] for x in trainset[0]]
+titles_1 = [titles[x] for x in trainset[1]]
+shop_1 = [shop[x] for x in trainset[1]]
+features_1 = [features[x] for x in trainset[1]]
+model_id_1 = [model_id[x] for x in trainset[1]]
+titles_2 = [titles[x] for x in trainset[2]]
+shop_2 = [shop[x] for x in trainset[2]]
+features_2 = [features[x] for x in trainset[2]]
+model_id_2 = [model_id[x] for x in trainset[2]]
+titles_3 = [titles[x] for x in trainset[3]]
+shop_3 = [shop[x] for x in trainset[3]]
+features_3 = [features[x] for x in trainset[3]]
+model_id_3 = [model_id[x] for x in trainset[3]]
+titles_4 = [titles[x] for x in trainset[4]]
+shop_4 = [shop[x] for x in trainset[4]]
+features_4 = [features[x] for x in trainset[4]]
+model_id_4 = [model_id[x] for x in trainset[4]]
+
+#sIGNATURE MATRIX DIMENSIONS
+dim_SIG_0 = SIGdim(features_0, titles_0)
+dim_SIG_1 = SIGdim(features_1, titles_1) 
+dim_SIG_2 = SIGdim(features_2, titles_2) 
+dim_SIG_3 = SIGdim(features_3, titles_3)
+dim_SIG_4 = SIGdim(features_4, titles_4) 
+dim_SIG_ = SIGdim(features, titles)
+
+
+from collections import defaultdict
+from collections import Counter
+def list_duplicates(seq):
+    tally = defaultdict(list)
+    for i,item in enumerate(seq):
+        tally[item].append(i)
+    return ((key,locs) for key,locs in tally.items() 
+                            if len(locs)>1)   
+
+def dups(seq): 
+    s = seq
+    dups = []
+    for dup in sorted(list_duplicates(s)): 
+        if len(dup[1]) == 2:  
+            dups.append(tuple((dup[1][0], dup[1][1])))
+        elif len(dup[1]) == 3:
+            dups.append(tuple((dup[1][0], dup[1][1])))
+            dups.append(tuple((dup[1][0], dup[1][2])))
+            dups.append(tuple((dup[1][1], dup[1][2])))
+        elif len(dup[1]) == 4:
+            dups.append(tuple((dup[1][0], dup[1][1])))
+            dups.append(tuple((dup[1][0], dup[1][2])))
+            dups.append(tuple((dup[1][0], dup[1][3])))
+            dups.append(tuple((dup[1][1], dup[1][2])))
+            dups.append(tuple((dup[1][1], dup[1][3])))
+            dups.append(tuple((dup[1][2], dup[1][3])))
+    
+    return dups
+
+def get_br(sig_dim, threshold):
+        """Approximates the bandwidth (number of rows in each band)
+        needed to get threshold.
+        Threshold t = (1/b) ** (1/r) where
+        b = #bands
+        r = #rows per band
+        n = b * r = #elements in signature
+        """
+        n = sig_dim
+        t = threshold
+        def get_bandwidth(n, t):
+        
+            best = n, 1
+            minerr  = float("inf")
+            for r in range(1, n + 1):
+                try:
+                    b = 1. / (t ** r)
+                except:             # Divide by zero, your signature is huge
+                    return best
+                err = abs(n - (b * r))
+                if err < minerr:
+                    best = r
+                    minerr = err
+            return best
+        r = get_bandwidth(n, t)
+        b = int(n / r)
+        err = n - b * r
+        new_sig_dim = n - err
+        return [b, r, new_sig_dim]
+   
+def Samebrand(candidate, titless):
+    brandlist = ['Philips', 'Samsung', 'Sharp', 'Toshiba', 'Hisense', 'Sony', 'LG', 'RCA', 'Panasonic', 'VIZIO', 'Naxa', 'Coby', 'Vizio', 'Avue', 'Insignia', 'SunBriteTV', 'Magnavox', 'Sanyo', 'JVC', 'Haier', 'Venturer', 'Westinghouse', 'Sansui', 'Pyle', 'NEC', 'Sceptre', 'ViewSonic', 'Mitsubishi', 'SuperSonic', 'Curtisyoung', 'Vizio', 'TCL', 'Sansui', 'Seiki']
+    flag = False
+    brand0 = None
+    for item_a in brandlist:
+        for item_b in titless[candidate[0]].split():
+            if item_a == item_b:
+                brand0 = item_a
+    brand1 = None
+    for item_1 in brandlist:
+        for item_2 in titless[candidate[1]].split():
+            if item_1 == item_2:
+                brand1 = item_1
+    
+    
+    if brand1 == brand0:
+        flag = True
+    
+    return flag    
+
+def Samewebshop(candidate, shopp):
+    flag = False
+    if shopp[candidate[0]] == shopp[candidate[1]]:
+        flag = True
+        
+    return flag
+             
+
+dup_ = dups(model_id)
+dup_ = [dup for dup in dup_ if Samebrand((dup[0], dup[1]), titles) is True]
+dup_ = [dup for dup in dup_ if Samewebshop((dup[0], dup[1]), shop) is False]
+dup_0 = dups(model_id_0)
+dup_0 = [dup for dup in dup_0 if Samebrand((dup[0], dup[1]), titles_0) is True]
+dup_0 = [dup for dup in dup_0 if Samewebshop((dup[0], dup[1]), shop_0) is False]
+dup_1 = dups(model_id_1)
+dup_1 = [dup for dup in dup_1 if Samebrand((dup[0], dup[1]), titles_1) is True]
+dup_1 = [dup for dup in dup_1 if Samewebshop((dup[0], dup[1]), shop_1) is False]
+dup_2 = dups(model_id_2)
+dup_2 = [dup for dup in dup_2 if Samebrand((dup[0], dup[1]), titles_2) is True]
+dup_2 = [dup for dup in dup_2 if Samewebshop((dup[0], dup[1]), shop_2) is False]
+dup_3 = dups(model_id_3)
+dup_3 = [dup for dup in dup_3 if Samebrand((dup[0], dup[1]), titles_3) is True]
+dup_3 = [dup for dup in dup_3 if Samewebshop((dup[0], dup[1]), shop_3) is False]
+dup_4 = dups(model_id_0)
+dup_4 = [dup for dup in dup_4 if Samebrand((dup[0], dup[1]), titles_4) is True]
+dup_4 = [dup for dup in dup_4 if Samewebshop((dup[0], dup[1]), shop_4) is False]
+
+frac_comp = []
+PQ = []
+PC = []
+F1 = []
+
+cand_  = [] 
+cand_0 = []
+cand_1 = []
+cand_2 = []
+cand_3 = []
+cand_4 = []
+sims_ = []
+sims_0 = []
+sims_1 = []
+sims_2 = []
+sims_3 = []
+sims_4 = []
+
+#Get bands and rows depending on n and t
+br_ = [get_br(dim_SIG_, t) for t in np.arange(0.05, 1, 0.05)]
+br_0 = [get_br(dim_SIG_0, t) for t in np.arange(0.05, 1, 0.05)]
+br_1 = [get_br(dim_SIG_1, t) for t in np.arange(0.05, 1, 0.05)]
+br_2 = [get_br(dim_SIG_2, t) for t in np.arange(0.05, 1, 0.05)]
+br_3 = [get_br(dim_SIG_3, t) for t in np.arange(0.05, 1, 0.05)]
+br_4 = [get_br(dim_SIG_4, t) for t in np.arange(0.05, 1, 0.05)]
+
+#12:55 15:10 = 2.15
+
+for indx, t in enumerate(np.arange(0.05, 1, 0.05)):
+    cands_ = LSH_CANDIDATE_PAIRS(titles, shop, features, model_id, t, br_[indx][0], br_[indx][1], br_[indx][2])
+    sims_.append(cands_)
+    cand_.append(list(k for k,v in cands_.items()))
+     
+for indx, t in enumerate(np.arange(0.05, 1, 0.05)):
+    cands_0 = LSH_CANDIDATE_PAIRS(titles_0, shop_0, features_0, model_id_0, t, br_0[indx][0], br_0[indx][1], br_0[indx][2])
+    sims_0.append(cands_0)
+    cand_0.append(list(k for k,v in cands_0.items()))
+    
+for indx, t in enumerate(np.arange(0.05, 1, 0.05)):
+    cands_1 = LSH_CANDIDATE_PAIRS(titles_1, shop_1, features_1, model_id_1, t, br_1[indx][0], br_1[indx][1], br_1[indx][2])
+    sims_1.append(cands_1)
+    cand_1.append(list(k for k,v in cands_1.items()))
+    
+for indx, t in enumerate(np.arange(0.05, 1, 0.05)):
+    cands_2 = LSH_CANDIDATE_PAIRS(titles_2, shop_2, features_2, model_id_2, t, br_2[indx][0], br_2[indx][1], br_2[indx][2])
+    sims_2.append(cands_2)
+    cand_2.append(list(k for k,v in cands_2.items()))
+    
+for indx, t in enumerate(np.arange(0.05, 1, 0.05)):
+    cands_3 = LSH_CANDIDATE_PAIRS(titles_3, shop_3, features_3, model_id_3, t, br_3[indx][0], br_3[indx][1], br_3[indx][2])
+    sims_3.append(cands_3)
+    cand_3.append(list(k for k,v in cands_3.items()))
+    
+for indx, t in enumerate(np.arange(0.05, 1, 0.05)):
+    cands_4 = LSH_CANDIDATE_PAIRS(titles_4, shop_4, features_4, model_id_4, t, br_4[indx][0], br_4[indx][1], br_4[indx][2])
+    sims_4.append(cands_4)
+    cand_4.append(list(k for k,v in cands_4.items()))
+    
+
+PQ_ = []
+frac_comp_ = []
+PC_ = []
+F1_ = []
+for x in cand_:
+    frac_comp_.append(len(x)/ 54739)
+    #f = []
+    #for tup in x:
+        #if tup in dup_0:
+           # f.append(tup)
+        
+    d = [ele for ele, count in Counter(dup_ + x).items()
+                                       if count > 1]
+    #pq = (len(f)/len(x))
+    pq = (len(d)/ len(x))
+    pc = (len(d)/len(dup_))
+    if (pc + pq) == 0:
+        f1 = 0
+        F1_.append(f1)
+    else:
+        f1 = (2*pq*pc)/(pc+pq)
+        F1_.append(f1)
+    PC_.append(pc)
+    PQ_.append(pq)
+
+PQ0 = []
+frac_comp0 = []
+PC0 = []
+F10 = []
+for x in cand_0:
+    frac_comp0.append(len(x)/ 54739)
+    #f = []
+    #for tup in x:
+        #if tup in dup_0:
+           # f.append(tup)
+        
+    d = [ele for ele, count in Counter(dup_0 + x).items()
+                                       if count > 1]
+    #pq = (len(f)/len(x))
+    pq = (len(d)/ len(x))
+    pc = (len(d)/len(dup_0))
+    if (pc + pq) == 0:
+        f1 = 0
+        F10.append(f1)
+    else:
+        f1 = (2*pq*pc)/(pc+pq)
+        F10.append(f1)
+    PC0.append(pc)
+    PQ0.append(pq)
+    
+frac_comp1 = []
+PC1 = []
+F11 = []    
+PQ1 = []  
+for x in cand_1:
+    frac_comp1.append(len(x)/ 54739)
+    d = [ele for ele, count in Counter(dup_1 + x).items()
+                                         if count > 1]
+    pq = (len(d)/ len(x))
+    PQ1.append(pq)
+    pc = (len(d)/len(dup_1))
+    PC1.append(pc)
+    if (pc + pq) == 0:
+        f1 = 0
+        F11.append(f1)
+    else:
+        f1 = (2*pq*pc)/(pc+pq)
+        F11.append(f1)
+ 
+PQ2 = [] 
+frac_comp2 = []
+PC2 = []
+F12 = []       
+for x in cand_2:
+    frac_comp2.append(len(x)/ 54739)
+    d = [ele for ele, count in Counter(dup_2 + x).items()
+                                     if count > 1]
+    pq = (len(d)/ len(x))
+    PQ2.append(pq)
+    pc = (len(d)/len(dup_2))
+    PC2.append(pc)
+    if (pc + pq) == 0:
+        f1 = 0
+        F12.append(f1)
+    else:
+        f1 = (2*pq*pc)/(pc+pq)
+        F12.append(f1)
+     
+PQ3 = []
+frac_comp3 = []
+PC3 = []
+F13 = []
+for x in cand_3:
+    frac_comp3.append(len(x)/ 54739)
+    d = [ele for ele, count in Counter(dup_3 + x).items()
+                                          if count > 1]
+    pq = (len(d)/ len(x))
+    PQ3.append(pq)
+    pc = (len(d)/len(dup_3))
+    PC3.append(pc)
+    if (pc + pq) == 0:
+        f1 = 0
+        F13.append(f1)
+    else:
+        f1 = (2*pq*pc)/(pc+pq)
+        F13.append(f1)
+
+PQ4 =[] 
+frac_comp4 = []
+PC4 = []
+F14 = []   
+for x in cand_4:
+    frac_comp4.append(len(x)/ 54739)
+    d = [ele for ele, count in Counter(dup_4 + x).items()
+                                          if count > 1]
+    pq = (len(d)/ len(x))
+    PQ4.append(pq)
+    pc = (len(d)/len(dup_4))
+    PC4.append(pc)
+    if (pc + pq) == 0:
+        f1 = 0
+        F14.append(f1)
+    else:
+        f1 = (2*pq*pc)/(pc+pq)
+        F14.append(f1)
+        
+#AVERAGE OVER BOOTSTRAPS
+for i in range(len(PQ0)):
+    pq = (PQ0[i] + PQ1[i] + PQ2[i] + PQ3[i] + PQ4[i] + PQ_[i]) / 6
+    PQ.append(pq)
+    
+for i in range(len(frac_comp0)):
+    frac_compP = (frac_comp0[i] + frac_comp1[i] + frac_comp2[i] + frac_comp3[i] + frac_comp4[i] + frac_comp_[i] ) / 6
+    frac_comp.append(frac_compP)
+
+for i in range(len(PC0)):
+    pC = (PC0[i] + PC1[i] + PC2[i] + PC3[i] + PC4[i] + PC_[i]) / 6
+    PC.append(pC)
+
+for i in range(len(F10)):
+    f1 = (F10[i] + F11[i] + F12[i] + F13[i] + F14[i] + F1_[i]) / 6
+    F1.append(f1)
+    
+
+import matplotlib.pylab as pl
+
+pl.figure(figsize=(20,10))
+pl.plot(frac_comp, PQ, '-g')
+pl.xlabel('fraction comparisons') 
+pl.ylabel('pair quality')
+pl.show()
+
+
+pl.figure(figsize=(20,10))
+pl.plot(frac_comp, PC, '-r')
+pl.xlabel('fraction comparisons') 
+pl.ylabel('pair completeness') 
+pl.show()
+
+pl.figure(figsize=(20,10))
+pl.plot(frac_comp, F1)
+pl.xlabel('fraction comparisons') 
+pl.ylabel('F1-measure')
+pl.show()
+
+
+
+'''
+Step 5: Classification
+    
+'''
+#CONSIDER ONLY PAIRS THAT ARE CANDIDATES FROM LSH
+#Function Samewebshop: return True if products are from same webshop
+#Function Samebrand: return True if products are from same brand
+# candidate in the form (index, index)
+
+
+def jaccard_similarity(a, b):
+    ''' input: 2 keys (strings), of matching key-value pairs
+        return: 3-gram  jaccard similarity '''
+    N = 3
+    x = {a[i:i+N] for i in range(len(a)-N+1)}
+    y = {b[i:i+N] for i in range(len(b)-N+1)}
+    intersection = x.intersection(y)
+    union = x.union(y)
+    return float(len(intersection)) / len(union)
+
+import string
+def sim(candidate, features, titles, sims, num):
+    '''Input: candidate pair in the form (i,j)
+    Output: dissimilarity measure between 0-1
+    0: very similar
+    1: very dissimilar'''
+    
+    ### PART 1: keysimilarity for matching pairs 
+    match1 = []
+    match2 = []
+    
+    try:
+        for key in features[candidate[0]].keys():
+            match1.append(features[candidate[0]][key])
+        
+        for key in features[candidate[1]].keys(): #MATCH
+            match2.append(features[candidate[1]][key])
+            
+        str1 = ''      
+        for match in match1:
+            st1 = ''.join(word for word in match if word not in string.punctuation)
+            st1 = st1.replace(' ','')
+            st1 = st1.lower()
+            str1 += st1
+            
+        str2 = ''  
+        for match in match2:
+            st2 = ''.join(word for word in match if word not in string.punctuation)
+            st2 = st2.replace(' ','')
+            st2 = st2.lower()
+            str2 += st2
+        
+        sim_m_kv = jaccard_similarity(str1, str2)
+        
+    except ZeroDivisionError:
+        sim_m_kv = 0
+    
+    ### PART 2: titlesim 
+    tit1 = ''.join(word for word in titles[candidate[0]] if word not in string.punctuation)
+    tit1 = tit1.replace(' ','')
+    tit1 = tit1.lower()
+        
+    tit2 = ''.join(word for word in titles[candidate[1]] if word not in string.punctuation)
+    tit2 = tit2.replace(' ','')
+    tit2 = tit2.lower()
+    
+    tit_sim = jaccard_similarity(tit1, tit2)
+    
+    sim_jac = sims[num][candidate]
+    
+    #sim = 0.35*tit_sim + 0.15*sim_m_kv + 0.5*sim_jac
+    
+    return [tit_sim, sim_m_kv, sim_jac]
+    
+
+# def dissimilaritymatrix(candi, num, mod_id, shop, title, features, sims):
+#     '''Input = candidate pairs list (different thresholds t), 
+#     num: which threshold, mod_id: used for length of matrix
+#     shop = shop_0, shop_1 etc
+#     title = title_0, title_1
+#     sims = sims_0, sims_0 etc
+    
+#     Output = dissimilarity matrix'''
+#     dist = np.zeros( len(mod_id)*len(mod_id))
+#     dist = dist.reshape(len(mod_id), len(mod_id))
+#     #dist[range(len(trainset[0])), range(len(trainset[0]))] = float('inf')
+
+#     for i in range(len(dist)):
+#         for j in range(len(dist)):
+#             flag = Samebrand((i, j), title)
+#             flagg = Samewebshop((i, j), shop)
+#             candflag = ((i, j) in candi[num])
+#             if flag == False or flagg == True or candflag == False:
+#                 dist[i][j] = 10000     
+            
+#             else:
+#                 dist[i][j] =  sim((i, j), features, title, sims, num)
+    
+#     for i in range(len(dist)):
+#         for j in range(len(dist)):
+#             if i != j and dist[i][j] == float(0):              
+#                 dist[i][j] = 10000
+#                 #dist[i][j] = float('inf')
+    
+#     dist = np.triu(dist)                       
+#     dist = dist + dist.T - np.diag(np.diag(dist))           
+#     return dist 
+
+
+# distt  = dissimilaritymatrix(cand_0, 0, model_id_0, shop_0, titles_0, features_0, sims_0)
+ 
+
+# from sklearn.cluster import AgglomerativeClustering
+# from itertools import combinations
+# clustering = AgglomerativeClustering(affinity='precomputed', linkage='single', distance_threshold= 0.8 , n_clusters=None)
+# clustering.fit(distt)
+
+# cluster_duplicates = []
+# for cluster in range(clustering.n_clusters_): #for all clusters check products in cluster
+#     products_in_cluster = np.where(clustering.labels_ == cluster)[0]
+#     if (len(products_in_cluster) > 1):
+#         cluster_duplicates.extend(list(combinations(products_in_cluster, 2)))
+    
+# dupsfound = [ele for ele, count in Counter(cluster_duplicates + dup_0).items()
+#                                           if count > 1]   
+    
+
+''' CLASSIFICATION '''
+    
+titles_0_test = [titles[x] for x in testset[0]]
+shop_0_test = [shop[x] for x in testset[0]]
+features_0_test = [features[x] for x in testset[0]]
+model_id_0_test = [model_id[x] for x in testset[0]]
+titles_1_test = [titles[x] for x in testset[1]]
+shop_1_test = [shop[x] for x in testset[1]]
+features_1_test = [features[x] for x in testset[1]]
+model_id_1_test = [model_id[x] for x in testset[1]]
+titles_2_test = [titles[x] for x in testset[2]]
+shop_2_test = [shop[x] for x in testset[2]]
+features_2_test = [features[x] for x in testset[2]]
+model_id_2_test = [model_id[x] for x in testset[2]]
+titles_3_test = [titles[x] for x in testset[3]]
+shop_3_test = [shop[x] for x in testset[3]]
+features_3_test = [features[x] for x in testset[3]]
+model_id_3_test = [model_id[x] for x in testset[3]]
+titles_4_test = [titles[x] for x in testset[4]]
+shop_4_test = [shop[x] for x in testset[4]]
+features_4_test = [features[x] for x in testset[4]]
+model_id_4_test = [model_id[x] for x in testset[4]]
+
+dim_SIG_0_test = SIGdim(features_0_test, titles_0_test)
+dim_SIG_1_test = SIGdim(features_1_test, titles_1_test) 
+dim_SIG_2_test = SIGdim(features_2_test, titles_2_test) 
+dim_SIG_3_test = SIGdim(features_3_test, titles_3_test)
+dim_SIG_4_test = SIGdim(features_4_test, titles_4_test) 
+
+dup_0_test = dups(model_id_0_test)
+#dup_0_test = [dup for dup in dup_0_test if Samebrand((dup[0], dup[1]), titles_0_test) is True]
+#dup_0_test = [dup for dup in dup_0_test if Samewebshop((dup[0], dup[1]), shop_0_test) is False]
+dup_1_test = dups(model_id_1_test)
+#dup_1_test = [dup for dup in dup_1_test if Samebrand((dup[0], dup[1]), titles_1_test) is True]
+#dup_1_test = [dup for dup in dup_1_test if Samewebshop((dup[0], dup[1]), shop_1_test) is False]
+dup_2_test = dups(model_id_2_test)
+#dup_2_test = [dup for dup in dup_2_test if Samebrand((dup[0], dup[1]), titles_2_test) is True]
+#dup_2_test = [dup for dup in dup_2_test if Samewebshop((dup[0], dup[1]), shop_2_test) is False]
+dup_3_test = dups(model_id_3_test)
+#dup_3_test = [dup for dup in dup_3_test if Samebrand((dup[0], dup[1]), titles_3_test) is True]
+#dup_3_test = [dup for dup in dup_3_test if Samewebshop((dup[0], dup[1]), shop_3_test) is False]
+dup_4_test = dups(model_id_0_test)
+#dup_4_test = [dup for dup in dup_4_test if Samebrand((dup[0], dup[1]), titles_4_test) is True]
+#dup_4_test = [dup for dup in dup_4_test if Samewebshop((dup[0], dup[1]), shop_4_test) is False]
+
+cand_0_test = []
+cand_1_test = []
+cand_2_test = []
+cand_3_test = []
+cand_4_test = []
+sims_0_test = []
+sims_1_test = []
+sims_2_test = []
+sims_3_test = []
+sims_4_test = []
+
+#Get bands and rows depending on n and t
+br_0_test = [get_br(dim_SIG_0_test, t) for t in np.arange(0.05, 1, 0.05)]
+br_1_test = [get_br(dim_SIG_1_test, t) for t in np.arange(0.05, 1, 0.05)]
+br_2_test = [get_br(dim_SIG_2_test, t) for t in np.arange(0.05, 1, 0.05)]
+br_3_test = [get_br(dim_SIG_3_test, t) for t in np.arange(0.05, 1, 0.05)]
+br_4_test = [get_br(dim_SIG_4_test, t) for t in np.arange(0.05, 1, 0.05)]
+
+for indx, t in enumerate(np.arange(0.05, 1, 0.05)):
+    cands_0_test = LSH_CANDIDATE_PAIRS(titles_0_test, shop_0_test, features_0_test, model_id_0_test, t, br_0_test[indx][0], br_0_test[indx][1], br_0_test[indx][2])
+    sims_0_test.append(cands_0_test)
+    cand_0_test.append(list(k for k,v in cands_0_test.items()))
+    
+for indx, t in enumerate(np.arange(0.05, 1, 0.05)):
+    cands_1_test = LSH_CANDIDATE_PAIRS(titles_1_test, shop_1_test, features_1_test, model_id_1_test, t, br_1_test[indx][0], br_1_test[indx][1], br_1_test[indx][2])
+    sims_1_test.append(cands_1_test)
+    cand_1_test.append(list(k for k,v in cands_1_test.items()))
+    
+for indx, t in enumerate(np.arange(0.05, 1, 0.05)):
+    cands_2_test = LSH_CANDIDATE_PAIRS(titles_2_test, shop_2_test, features_2_test, model_id_2_test, t, br_2_test[indx][0], br_2_test[indx][1], br_2_test[indx][2])
+    sims_2_test.append(cands_2_test)
+    cand_2_test.append(list(k for k,v in cands_2_test.items()))
+    
+for indx, t in enumerate(np.arange(0.05, 1, 0.05)):
+    cands_3_test = LSH_CANDIDATE_PAIRS(titles_3_test, shop_3_test, features_3_test, model_id_3_test, t, br_3_test[indx][0], br_3_test[indx][1], br_3_test[indx][2])
+    sims_3_test.append(cands_3_test)
+    cand_3_test.append(list(k for k,v in cands_3_test.items()))
+    
+for indx, t in enumerate(np.arange(0.05, 1, 0.05)):
+    cands_4_test = LSH_CANDIDATE_PAIRS(titles_4_test, shop_4_test, features_4_test, model_id_4_test, t, br_4_test[indx][0], br_4_test[indx][1], br_4_test[indx][2])
+    sims_4_test.append(cands_4_test)
+    cand_4_test.append(list(k for k,v in cands_4_test.items()))
+    
+frac_comp_test = []
+
+frac_comp_test_0 = []
+for x in cand_0_test:
+    frac_comp_test_0.append(len(x)/ 54739)
+    
+frac_comp_test_1 = []
+for x in cand_1_test:
+    frac_comp_test_1.append(len(x)/ 54739)
+    
+frac_comp_test_2 = []
+for x in cand_2_test:
+    frac_comp_test_2.append(len(x)/ 54739)
+    
+frac_comp_test_3 = []
+for x in cand_3_test:
+    frac_comp_test_3.append(len(x)/ 54739)
+    
+frac_comp_test_4 = []
+for x in cand_4_test:
+    frac_comp_test_4.append(len(x)/ 54739)
+
+for i in range(len(frac_comp_test_0)):
+    frac_compP = (frac_comp_test_0[i] + frac_comp_test_1[i] + frac_comp_test_2[i] + frac_comp_test_3[i] + frac_comp_test_4[i]) / 5
+    frac_comp_test.append(frac_compP)
+
+
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import f1_score
+from sklearn.model_selection import GridSearchCV
+#from imblearn.over_sampling import RandomOverSampler
+
+train_data_00 = []
+test_data_00 = []
+for c in cand_0[0]:
+    r = {"pair": c,
+         'tit_sim': sim(c, features_0, titles_0, sims_0, 0)[0],
+         'kv_sim': sim(c, features_0, titles_0, sims_0, 0)[1],
+         'jaq_sim': sim(c, features_0, titles_0, sims_0, 0)[2],
+         'duplicate': (c in dup_0)}
+    train_data_00.append(r)  
+    df_00_train = pd.DataFrame(train_data_00)
+    X_train_00 = df_00_train[['tit_sim', 'kv_sim', 'jaq_sim']]
+    y_train_00 = df_00_train['duplicate']
+    
+
+for c in cand_0_test[0]:
+    r = {"pair": c,
+         'tit_sim': sim(c, features_0_test, titles_0_test, sims_0_test , 0)[0],
+         'kv_sim': sim(c, features_0_test, titles_0_test, sims_0_test , 0)[1],
+         'jaq_sim': sim(c, features_0_test, titles_0_test, sims_0_test , 0)[2],
+         'duplicate': (c in dup_0_test)}
+    test_data_00.append(r)
+    df_00_test = pd.DataFrame(test_data_00)
+    X_test_00 = df_00_test[['tit_sim', 'kv_sim', 'jaq_sim']]
+    y_test_00 = df_00_test['duplicate']
+    
+lr_0 = LogisticRegression(random_state=0).fit(X_train_00, y_train_00)
+param_grid_lr = {'C': np.logspace(-3, 3, 7)}
+grid_lr = GridSearchCV(lr_0, param_grid_lr, cv=3) 
+fitgrid_lr = grid_lr.fit(X_train_00, y_train_00)
+y_pred_lr_00 = grid_lr.predict(X_test_00)
+
+print(grid_lr.best_params_)
+print(grid_lr.score(y_pred_lr_00, y_test_00))
+
+print("The optimal value for C is: " + str(grid_lr.best_params_))
+    
+f1_0 = f1_score(y_test_00, y_pred_lr_00, average= 'macro')
+#classification_F1_0.append(f1)
+print("F1-score:")
+print(f1_score(y_test_00, y_pred_lr_00, average=None))        
+    
+
+classification_F1_0 = []
+for num in range(19):
+    train_data_0 = []
+    test_data_0 = []
+    for c in cand_0[num]:
+        r = {"pair": c,
+         'tit_sim': sim(c, features_0, titles_0, sims_0, num)[0],
+         'kv_sim': sim(c, features_0, titles_0, sims_0, num)[1],
+         'jaq_sim': sim(c, features_0, titles_0, sims_0, num)[2],
+         'duplicate': (c in dup_0)}
+        train_data_0.append(r) 
+        df_0_train = pd.DataFrame(train_data_0)
+        X_train_0 = df_0_train[['tit_sim', 'kv_sim', 'jaq_sim']]
+        y_train_0 = df_0_train['duplicate']
+        # oversample = RandomOverSampler(sampling_strategy='auto')
+        # X_train_0, y_train_0 = oversample.fit_resample(X_train_0, y_train_0)
+        # print(Counter(y_train_0))
+        
+    for c in cand_0_test[num]:
+        r = {"pair": c,
+         'tit_sim': sim(c, features_0_test, titles_0_test, sims_0_test , num)[0],
+         'kv_sim': sim(c, features_0_test, titles_0_test, sims_0_test , num)[1],
+         'jaq_sim': sim(c, features_0_test, titles_0_test, sims_0_test , num)[2],
+         'duplicate': (c in dup_0_test)}    
+        test_data_0.append(r)   
+        df_0_test = pd.DataFrame(test_data_0)
+        X_test_0 = df_0_test[['tit_sim', 'kv_sim', 'jaq_sim']]
+        y_test_0 = df_0_test['duplicate']
+
+    lr = LogisticRegression(random_state=0).fit(X_train_0, y_train_0)
+
+    param_grid_lr = {'C': np.logspace(-3, 3, 7)}
+    grid_lr = GridSearchCV(lr, param_grid_lr, cv=3) 
+    fitgrid_lr = grid_lr.fit(X_train_0, y_train_0)
+    y_pred_lr_0 = grid_lr.predict(X_test_0)
+
+    print("The optimal value for C is: " + str(grid_lr.best_params_))
+    f1 = f1_score(y_test_0, y_pred_lr_0, average='macro')
+    classification_F1_0.append(f1)
+
+    print("F1-score:")
+    print(f1_score(y_test_0, y_pred_lr_0, average='macro'))
+    
+classification_F1_1 = []
+for num in range(19):
+    train_data_1 = []
+    test_data_1 = []
+    for c in cand_1[num]:
+        r = {"pair": c,
+         'tit_sim': sim(c, features_1, titles_1, sims_1, num)[0],
+         'kv_sim': sim(c, features_1, titles_1, sims_1, num)[1],
+         'jaq_sim': sim(c, features_1, titles_1, sims_1, num)[2],
+         'duplicate': (c in dup_1)}
+        train_data_1.append(r) 
+        df_1_train = pd.DataFrame(train_data_1)
+        X_train_1 = df_1_train[['tit_sim', 'kv_sim', 'jaq_sim']]
+        y_train_1 = df_1_train['duplicate']
+    for c in cand_1_test[num]:
+        r = {"pair": c,
+         'tit_sim': sim(c, features_1_test, titles_1_test, sims_1_test , num)[0],
+         'kv_sim': sim(c, features_1_test, titles_1_test, sims_1_test , num)[1],
+         'jaq_sim': sim(c, features_1_test, titles_1_test, sims_1_test , num)[2],
+         'duplicate': (c in dup_1_test)}    
+        test_data_1.append(r)   
+        df_1_test = pd.DataFrame(test_data_1)
+        X_test_1 = df_1_test[['tit_sim', 'kv_sim', 'jaq_sim']]
+        y_test_1 = df_1_test['duplicate']
+
+
+    lr = LogisticRegression(random_state=0).fit(X_train_1, y_train_1)
+
+    param_grid_lr = {'C': np.logspace(-3, 3, 7)}
+    grid_lr = GridSearchCV(lr, param_grid_lr, cv=3) 
+    fitgrid_lr = grid_lr.fit(X_train_1, y_train_1)
+    y_pred_lr_1 = grid_lr.predict(X_test_1)
+
+    print("The optimal value for C is: " + str(grid_lr.best_params_)) 
+    f1 = f1_score(y_test_1, y_pred_lr_1, average='macro')
+    classification_F1_1.append(f1)
+
+    print("F1-score:")
+    print(f1_score(y_test_1, y_pred_lr_1, average='macro'))
+
+classification_F1_2 = []
+for num in range(19):
+    train_data_2 = []
+    test_data_2 = []
+    for c in cand_2[num]:
+        r = {"pair": c,
+         'tit_sim': sim(c, features_2, titles_2, sims_2, num)[0],
+         'kv_sim': sim(c, features_2, titles_2, sims_2, num)[1],
+         'jaq_sim': sim(c, features_2, titles_2, sims_2, num)[2],
+         'duplicate': (c in dup_2)}
+        train_data_2.append(r) 
+        df_2_train = pd.DataFrame(train_data_2)
+        X_train_2 = df_2_train[['tit_sim', 'kv_sim', 'jaq_sim']]
+        y_train_2 = df_2_train['duplicate']
+    for c in cand_2_test[num]:
+        r = {"pair": c,
+         'tit_sim': sim(c, features_2_test, titles_2_test, sims_2_test , num)[0],
+         'kv_sim': sim(c, features_2_test, titles_2_test, sims_2_test , num)[1],
+         'jaq_sim': sim(c, features_2_test, titles_2_test, sims_2_test , num)[2],
+         'duplicate': (c in dup_2_test)}    
+        test_data_2.append(r)   
+        df_2_test = pd.DataFrame(test_data_2)
+        X_test_2 = df_2_test[['tit_sim', 'kv_sim', 'jaq_sim']]
+        y_test_2 = df_2_test['duplicate']
+
+
+    lr = LogisticRegression(random_state=0).fit(X_train_2, y_train_2)
+
+    param_grid_lr = {'C': np.logspace(-3, 3, 7)}
+    grid_lr = GridSearchCV(lr, param_grid_lr, cv=3) 
+    fitgrid_lr = grid_lr.fit(X_train_2, y_train_2)
+    y_pred_lr_2 = grid_lr.predict(X_test_2)
+
+    print("The optimal value for C is: " + str(grid_lr.best_params_))
+    f1 = f1_score(y_test_2, y_pred_lr_2, average='macro')
+    classification_F1_2.append(f1)
+
+    print("F1-score:")
+    print(f1_score(y_test_2, y_pred_lr_2, average='macro'))
+    
+classification_F1_3 = []
+for num in range(19):
+    train_data_3 = []
+    test_data_3 = []
+    for c in cand_3[num]:
+        r = {"pair": c,
+         'tit_sim': sim(c, features_3, titles_3, sims_3, num)[0],
+         'kv_sim': sim(c, features_3, titles_3, sims_3, num)[1],
+         'jaq_sim': sim(c, features_3, titles_3, sims_3, num)[2],
+         'duplicate': (c in dup_3)}
+        train_data_3.append(r) 
+        df_3_train = pd.DataFrame(train_data_3)
+        X_train_3 = df_3_train[['tit_sim', 'kv_sim', 'jaq_sim']]
+        y_train_3 = df_3_train['duplicate']
+    for c in cand_3_test[num]:
+        r = {"pair": c,
+         'tit_sim': sim(c, features_3_test, titles_3_test, sims_3_test , num)[0],
+         'kv_sim': sim(c, features_3_test, titles_3_test, sims_3_test , num)[1],
+         'jaq_sim': sim(c, features_3_test, titles_3_test, sims_3_test , num)[2],
+         'duplicate': (c in dup_3_test)}    
+        test_data_3.append(r)   
+        df_3_test = pd.DataFrame(test_data_3)
+        X_test_3 = df_3_test[['tit_sim', 'kv_sim', 'jaq_sim']]
+        y_test_3 = df_3_test['duplicate']
+
+    lr = LogisticRegression(random_state=0).fit(X_train_3, y_train_3)
+
+    param_grid_lr = {'C': np.logspace(-3, 3, 7)}
+    grid_lr = GridSearchCV(lr, param_grid_lr, cv=3) 
+    fitgrid_lr = grid_lr.fit(X_train_3, y_train_3)
+    y_pred_lr_3 = grid_lr.predict(X_test_3)
+
+    print("The optimal value for C is: " + str(grid_lr.best_params_))
+    f1 = f1_score(y_test_3, y_pred_lr_3, average='macro')
+    classification_F1_3.append(f1)
+
+    print("F1-score:")
+    print(f1_score(y_test_3, y_pred_lr_3, average='macro'))
+    
+classification_F1_4 = []
+for num in range(19):
+    train_data_4 = []
+    test_data_4 = []
+    for c in cand_4[num]:
+        r = {"pair": c,
+         'tit_sim': sim(c, features_4, titles_4, sims_4, num)[0],
+         'kv_sim': sim(c, features_4, titles_4, sims_4, num)[1],
+         'jaq_sim': sim(c, features_4, titles_4, sims_4, num)[2],
+         'duplicate': (c in dup_4)}
+        train_data_4.append(r) 
+        df_4_train = pd.DataFrame(train_data_4)
+        X_train_4 = df_4_train[['tit_sim', 'kv_sim', 'jaq_sim']]
+        y_train_4 = df_4_train['duplicate']
+    for c in cand_4_test[num]:
+        r = {"pair": c,
+         'tit_sim': sim(c, features_4_test, titles_4_test, sims_4_test , num)[0],
+         'kv_sim': sim(c, features_4_test, titles_4_test, sims_4_test , num)[1],
+         'jaq_sim': sim(c, features_4_test, titles_4_test, sims_4_test , num)[2],
+         'duplicate': (c in dup_4_test)}    
+        test_data_4.append(r)   
+        df_4_test = pd.DataFrame(test_data_4)
+        X_test_4 = df_4_test[['tit_sim', 'kv_sim', 'jaq_sim']]
+        y_test_4 = df_4_test['duplicate']
+    
+
+    lr = LogisticRegression(random_state=0).fit(X_train_4, y_train_4)
+
+    param_grid_lr = {'C': np.logspace(-3, 3, 7)}
+    grid_lr = GridSearchCV(lr, param_grid_lr, cv=3) 
+    fitgrid_lr = grid_lr.fit(X_train_4, y_train_4)
+    y_pred_lr_4 = grid_lr.predict(X_test_4)
+
+    print("The optimal value for C is: " + str(grid_lr.best_params_))
+    f1 = f1_score(y_test_4, y_pred_lr_4, average='macro')
+    classification_F1_4.append(f1)
+
+    print("F1-score:")
+    print(f1_score(y_test_4, y_pred_lr_4, average='macro'))
+    
+F1_TEST = []
+for i in range(len(classification_F1_0)):
+    f111= (classification_F1_0[i] + classification_F1_1[i] + classification_F1_2[i] + classification_F1_3[i] + classification_F1_4[i]) / 5
+    F1_TEST.append(f111)
+    
+pl.figure(figsize=(20,10))
+pl.plot(frac_comp_test, F1_TEST)
+pl.xlabel('fraction comparisons') 
+pl.ylabel('F1-measure LogisticRegression')
+pl.show()
+ 
+    
+    
+    
+    
